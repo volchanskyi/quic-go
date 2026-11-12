@@ -279,6 +279,102 @@ func TestWithClientAuth(t *testing.T) {
 	require.NoError(t, serverErr)
 }
 
+func TestServerReleasesTLSConnAfterHandshake(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "client"},
+		SignatureAlgorithm:    x509.PureEd25519,
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	require.NoError(t, err)
+
+	clientConf, serverConf := getTLSConfigs()
+	clientConf.Certificates = []tls.Certificate{{PrivateKey: priv, Certificate: [][]byte{certDER}}}
+	serverConf.ClientAuth = tls.RequireAnyClientCert
+	client, _, clientErr, server, _, serverErr := handshakeWithTLSConf(
+		t,
+		clientConf, serverConf,
+		utils.NewRTTStats(), utils.NewRTTStats(),
+		&wire.TransportParameters{ActiveConnectionIDLimit: 2}, &wire.TransportParameters{ActiveConnectionIDLimit: 2},
+		false,
+	)
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+
+	require.Nil(t, server.(*cryptoSetup).conn)
+	state := server.ConnectionState()
+	require.True(t, state.HandshakeComplete)
+	require.Equal(t, "crypto-setup", state.NegotiatedProtocol)
+	require.Len(t, state.PeerCertificates, 1)
+	require.Equal(t, "client", state.PeerCertificates[0].Subject.CommonName)
+	_, err = state.ExportKeyingMaterial("label", nil, 16)
+	require.NoError(t, err)
+
+	// a QUIC server doesn't accept post-handshake messages
+	err = server.HandleMessage(append([]byte{typeClientHello, 0, 0, 6}, []byte("foobar")...), protocol.Encryption1RTT)
+	require.ErrorIs(t, err, &qerr.TransportError{ErrorCode: 0x100 + alertUnexpectedMessage})
+	_, err = server.GetSessionTicket()
+	require.Error(t, err)
+	require.NoError(t, server.Close())
+
+	// the client keeps its TLS connection, to process session tickets
+	require.NotNil(t, client.(*cryptoSetup).conn)
+	require.NoError(t, client.Close())
+}
+
+func TestServerConnectionStateDuringHandshake(t *testing.T) {
+	clientConf, serverConf := getTLSConfigs()
+	client := NewCryptoSetupClient(
+		protocol.ConnectionID{},
+		&wire.TransportParameters{ActiveConnectionIDLimit: 2},
+		clientConf,
+		false,
+		utils.NewRTTStats(),
+		nil,
+		utils.DefaultLogger.WithPrefix("client"),
+		protocol.Version1,
+	)
+	var token protocol.StatelessResetToken
+	server := NewCryptoSetupServer(
+		protocol.ConnectionID{},
+		&net.UDPAddr{IP: net.IPv6loopback, Port: 1234},
+		&net.UDPAddr{IP: net.IPv6loopback, Port: 4321},
+		&wire.TransportParameters{ActiveConnectionIDLimit: 2, StatelessResetToken: &token},
+		serverConf,
+		false,
+		utils.NewRTTStats(),
+		nil,
+		utils.DefaultLogger.WithPrefix("server"),
+		protocol.Version1,
+	)
+
+	// the connection state can be read concurrently while the server releases its TLS connection
+	done := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				server.ConnectionState()
+			}
+		}
+	}()
+	_, clientErr, _, serverErr := handshake(t, client, server)
+	close(done)
+	<-readerDone
+	require.NoError(t, clientErr)
+	require.NoError(t, serverErr)
+	require.True(t, server.ConnectionState().HandshakeComplete)
+}
+
 func TestTransportParameters(t *testing.T) {
 	clientConf, serverConf := getTLSConfigs()
 	cTransportParameters := &wire.TransportParameters{ActiveConnectionIDLimit: 2, MaxIdleTimeout: 42 * time.Second}

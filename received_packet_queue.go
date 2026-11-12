@@ -18,6 +18,10 @@ type sidePacket struct {
 // Packets received on the Transport of the active path are queued in the main queue.
 // Packets received on any other Transport are queued in the side queue.
 // The side queue is only used by clients that probe or migrate to new paths.
+// receivedPacketQueueInitialSize is the size of the main queue's storage.
+// After a burst of packets, the storage shrinks back to this size once the queue is drained.
+const receivedPacketQueueInitialSize = 8
+
 type receivedPacketQueue struct {
 	mx     sync.Mutex
 	active *pathReceiver
@@ -28,7 +32,7 @@ type receivedPacketQueue struct {
 // Init initializes the queue.
 // The active pathReceiver is the one of the Transport that the connection was created on.
 func (q *receivedPacketQueue) Init(active *pathReceiver) {
-	q.main.Init(8)
+	q.main.Init(receivedPacketQueueInitialSize)
 	q.active = active
 }
 
@@ -73,7 +77,11 @@ func (q *receivedPacketQueue) Pop() (_ receivedPacket, path pathID, ok bool) {
 		return p.receivedPacket, p.source.id, true
 	}
 	if !q.main.Empty() {
-		return q.main.PopFront(), activePathID, true
+		p := q.main.PopFront()
+		if q.main.Empty() && q.main.Cap() > receivedPacketQueueInitialSize {
+			q.main.Init(receivedPacketQueueInitialSize)
+		}
+		return p, activePathID, true
 	}
 	return receivedPacket{}, activePathID, false
 }

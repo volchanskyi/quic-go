@@ -77,6 +77,32 @@ func TestReceivedPacketQueueLimits(t *testing.T) {
 	require.Equal(t, 2*protocol.MaxConnUnprocessedPackets, n)
 }
 
+func TestReceivedPacketQueueShrinksAfterBurst(t *testing.T) {
+	h := &pathReceiver{id: 1}
+	var q receivedPacketQueue
+	q.Init(h)
+
+	for range 100 {
+		require.True(t, q.Push(receivedPacket{}, h))
+	}
+	require.Greater(t, q.main.Cap(), receivedPacketQueueInitialSize)
+	for range 99 {
+		_, _, ok := q.Pop()
+		require.True(t, ok)
+	}
+	// the storage is kept while packets are queued
+	require.Greater(t, q.main.Cap(), receivedPacketQueueInitialSize)
+	_, _, ok := q.Pop()
+	require.True(t, ok)
+	require.Equal(t, receivedPacketQueueInitialSize, q.main.Cap())
+	require.True(t, q.Empty())
+
+	require.True(t, q.Push(receivedPacket{data: []byte("foo")}, h))
+	p, _, ok := q.Pop()
+	require.True(t, ok)
+	require.Equal(t, "foo", string(p.data))
+}
+
 func TestReceivedPacketQueueClear(t *testing.T) {
 	h1 := &pathReceiver{id: 1}
 	h2 := &pathReceiver{id: 2}

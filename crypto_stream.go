@@ -69,6 +69,8 @@ func (s *baseCryptoStream) Finish() error {
 		}
 	}
 	s.finished = true
+	// No more data is pushed to the queue after the stream is finished.
+	s.queue = frameSorter{}
 	return nil
 }
 
@@ -90,6 +92,10 @@ func (s *baseCryptoStream) PopCryptoFrame(maxLen protocol.ByteCount) *wire.Crypt
 	}
 	f.Data = s.writeBuf[:n]
 	s.writeBuf = s.writeBuf[n:]
+	if len(s.writeBuf) == 0 {
+		// Release the backing array: it is only referenced by the frames that are in flight.
+		s.writeBuf = nil
+	}
 	s.writeOffset += n
 	return f
 }

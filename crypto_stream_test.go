@@ -79,6 +79,34 @@ func TestCryptoStreamReceiveDataAfterFinish(t *testing.T) {
 	)
 }
 
+func TestCryptoStreamReleasesBuffers(t *testing.T) {
+	str := newCryptoStream()
+	_, err := str.Write([]byte("foobar"))
+	require.NoError(t, err)
+	f := str.PopCryptoFrame(expectedCryptoFrameLen(0) + 3)
+	require.Equal(t, []byte("foo"), f.Data)
+	require.NotNil(t, str.writeBuf)
+	f = str.PopCryptoFrame(protocol.MaxByteCount)
+	require.Equal(t, []byte("bar"), f.Data)
+	// the popped frame still references the data, but the stream doesn't
+	require.Nil(t, str.writeBuf)
+	require.False(t, str.HasData())
+
+	// writing more data after the buffer was released works
+	_, err = str.Write([]byte("baz"))
+	require.NoError(t, err)
+	f = str.PopCryptoFrame(protocol.MaxByteCount)
+	require.Equal(t, &wire.CryptoFrame{Offset: 6, Data: []byte("baz")}, f)
+
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("foobar")}))
+	require.Equal(t, []byte("foobar"), str.GetCryptoData())
+	require.NoError(t, str.Finish())
+	require.Nil(t, str.queue.queue)
+	// retransmissions are still ignored after the receive queue was released
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("bar"), Offset: 3}))
+	require.Nil(t, str.GetCryptoData())
+}
+
 func expectedCryptoFrameLen(offset protocol.ByteCount) protocol.ByteCount {
 	f := &wire.CryptoFrame{Offset: offset}
 	return f.Length(protocol.Version1)

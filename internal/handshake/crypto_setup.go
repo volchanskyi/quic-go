@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 	"github.com/quic-go/quic-go/qlogwriter"
 	"github.com/quic-go/quic-go/quicvarint"
 )
+
+// alertUnexpectedMessage is the TLS alert unexpected_message.
+const alertUnexpectedMessage = 10
 
 type quicVersionContextKey struct{}
 
@@ -57,6 +61,12 @@ type cryptoSetup struct {
 	handshakeSealer LongHeaderSealer
 
 	used0RTT atomic.Bool
+
+	// The server releases its TLS connection once the handshake completes,
+	// since it doesn't accept any post-handshake messages.
+	// connMx protects conn and connState, which are accessed concurrently by ConnectionState.
+	connMx    sync.Mutex
+	connState *tls.ConnectionState
 
 	aead          *updatableAEAD
 	has1RTTSealer bool
@@ -211,12 +221,22 @@ func (h *cryptoSetup) StartHandshake(ctx context.Context) error {
 // Close closes the crypto setup.
 // It aborts the handshake, if it is still running.
 func (h *cryptoSetup) Close() error {
+	h.connMx.Lock()
+	defer h.connMx.Unlock()
+
+	if h.conn == nil {
+		return nil
+	}
 	return h.conn.Close()
 }
 
 // HandleMessage handles a TLS handshake message.
 // It is called by the crypto streams when a new message is available.
 func (h *cryptoSetup) HandleMessage(data []byte, encLevel protocol.EncryptionLevel) error {
+	if h.conn == nil {
+		// This is the error crypto/tls returns for a post-handshake message on a QUIC server.
+		return qerr.NewLocalCryptoError(alertUnexpectedMessage, errors.New("tls: received a post-handshake message"))
+	}
 	if err := h.handleMessage(data, encLevel); err != nil {
 		return wrapError(err)
 	}
@@ -376,6 +396,9 @@ func (h *cryptoSetup) getDataForSessionTicket() []byte {
 // Due to limitations in crypto/tls, it's only possible to generate a single session ticket per connection.
 // It is only valid for the server.
 func (h *cryptoSetup) GetSessionTicket() ([]byte, error) {
+	if h.conn == nil {
+		return nil, errors.New("GetSessionTicket called after the TLS connection was released")
+	}
 	if err := h.conn.SendSessionTicket(tls.QUICSessionTicketOptions{
 		EarlyData: h.allow0RTT,
 		Extra:     [][]byte{addSessionStateExtraPrefix(h.getDataForSessionTicket())},
@@ -400,7 +423,24 @@ func (h *cryptoSetup) GetSessionTicket() ([]byte, error) {
 			h.logger.Errorf("unexpected event: %v", ev.Kind)
 		}
 	}
+	if h.perspective == protocol.PerspectiveServer {
+		if err := h.releaseConn(); err != nil {
+			return nil, err
+		}
+	}
 	return ticket, nil
+}
+
+// releaseConn saves the connection state and releases the TLS connection.
+func (h *cryptoSetup) releaseConn() error {
+	h.connMx.Lock()
+	defer h.connMx.Unlock()
+
+	state := h.conn.ConnectionState()
+	h.connState = &state
+	err := h.conn.Close()
+	h.conn = nil
+	return err
 }
 
 // handleSessionTicket is called for the server when receiving the client's session ticket.
@@ -670,6 +710,15 @@ func (h *cryptoSetup) Get1RTTOpener() (ShortHeaderOpener, error) {
 }
 
 func (h *cryptoSetup) ConnectionState() ConnectionState {
+	h.connMx.Lock()
+	defer h.connMx.Unlock()
+
+	if h.connState != nil {
+		return ConnectionState{
+			ConnectionState: *h.connState,
+			Used0RTT:        h.used0RTT.Load(),
+		}
+	}
 	return ConnectionState{
 		ConnectionState: h.conn.ConnectionState(),
 		Used0RTT:        h.used0RTT.Load(),

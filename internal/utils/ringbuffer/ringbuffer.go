@@ -18,6 +18,11 @@ func (r *RingBuffer[T]) Len() int {
 	return len(r.ring)
 }
 
+// Cap returns the size of the backing storage.
+func (r *RingBuffer[T]) Cap() int {
+	return cap(r.ring)
+}
+
 // Empty says if the ring buffer is empty.
 func (r *RingBuffer[T]) Empty() bool {
 	return len(r.ring) == 0
