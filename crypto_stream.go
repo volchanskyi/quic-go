@@ -69,6 +69,8 @@ func (s *baseCryptoStream) Finish() error {
 		}
 	}
 	s.finished = true
+	// No more data is pushed to the queue after the stream is finished.
+	s.queue = frameSorter{}
 	return nil
 }
 
@@ -89,9 +91,18 @@ func (s *baseCryptoStream) PopCryptoFrame(maxLen protocol.ByteCount) *wire.Crypt
 		return nil
 	}
 	f.Data = s.writeBuf[:n]
-	s.writeBuf = s.writeBuf[n:]
+	s.dropSentData(n)
 	s.writeOffset += n
 	return f
+}
+
+// dropSentData removes the first n bytes from the write buffer, and releases the backing array
+// once all data has been sent. Only the CRYPTO frames in flight still reference it.
+func (s *baseCryptoStream) dropSentData(n protocol.ByteCount) {
+	s.writeBuf = s.writeBuf[n:]
+	if len(s.writeBuf) == 0 {
+		s.writeBuf = nil
+	}
 }
 
 type cryptoStream struct {
@@ -211,7 +222,7 @@ func (s *initialCryptoStream) PopCryptoFrame(maxLen protocol.ByteCount) *wire.Cr
 		}
 		if !foundCuts {
 			// no more cuts found, we're done sending out everything up until s.end
-			s.writeBuf = s.writeBuf[s.end:]
+			s.dropSentData(s.end)
 			s.end = protocol.InvalidByteCount
 			s.scramble = false
 		}
