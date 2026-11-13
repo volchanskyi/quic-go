@@ -45,11 +45,14 @@ func TestClear(t *testing.T) {
 	r.Init(2)
 	r.PushBack(1)
 	r.PushBack(2)
-	require.Equal(t, 2, r.Len())
+	r.PushBack(3)
+	require.Equal(t, 3, r.Len())
+	require.Equal(t, 4, r.Cap())
 	r.Clear()
 	require.True(t, r.Empty())
-	r.PushBack(3)
-	require.Equal(t, 3, r.PopFront())
+	require.Equal(t, 4, r.Cap())
+	r.PushBack(4)
+	require.Equal(t, 4, r.PopFront())
 }
 
 func BenchmarkRingBuffer(b *testing.B) {

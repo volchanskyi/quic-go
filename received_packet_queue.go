@@ -23,12 +23,18 @@ type receivedPacketQueue struct {
 	active *pathReceiver
 	main   ringbuffer.RingBuffer[receivedPacket]
 	side   ringbuffer.RingBuffer[sidePacket] // only allocated once a packet is received on a different Transport
+
+	mainPeak int // the most packets queued in the main queue since it was last empty
 }
+
+// receivedPacketQueueMinSize is the size of the main queue's storage.
+// A burst of packets grows it, and it shrinks back once the queue stays mostly empty.
+const receivedPacketQueueMinSize = 8
 
 // Init initializes the queue.
 // The active pathReceiver is the one of the Transport that the connection was created on.
 func (q *receivedPacketQueue) Init(active *pathReceiver) {
-	q.main.Init(8)
+	q.main.Init(receivedPacketQueueMinSize)
 	q.active = active
 }
 
@@ -43,6 +49,7 @@ func (q *receivedPacketQueue) Push(p receivedPacket, source *pathReceiver) bool 
 			return false
 		}
 		q.main.PushBack(p)
+		q.mainPeak = max(q.mainPeak, q.main.Len())
 		return true
 	}
 
@@ -73,9 +80,22 @@ func (q *receivedPacketQueue) Pop() (_ receivedPacket, path pathID, ok bool) {
 		return p.receivedPacket, p.source.id, true
 	}
 	if !q.main.Empty() {
-		return q.main.PopFront(), activePathID, true
+		p := q.main.PopFront()
+		if q.main.Empty() {
+			q.maybeShrinkMain()
+		}
+		return p, activePathID, true
 	}
 	return receivedPacket{}, activePathID, false
+}
+
+// maybeShrinkMain is called when the main queue was drained. It halves the storage if the packets
+// queued since the queue was last empty used at most a quarter of it, so a busy queue keeps it.
+func (q *receivedPacketQueue) maybeShrinkMain() {
+	if size := q.main.Cap(); size > receivedPacketQueueMinSize && q.mainPeak <= size/4 {
+		q.main.Init(size / 2)
+	}
+	q.mainPeak = 0
 }
 
 func (q *receivedPacketQueue) Empty() bool {

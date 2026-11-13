@@ -78,6 +78,62 @@ func TestReceivedPacketQueueLimits(t *testing.T) {
 	require.Equal(t, 2*protocol.MaxConnUnprocessedPackets, n)
 }
 
+func TestReceivedPacketQueueShrinks(t *testing.T) {
+	h := &pathReceiver{id: 1}
+	var q receivedPacketQueue
+	q.Init(h)
+
+	pushAndPop := func(n int) {
+		t.Helper()
+		for range n {
+			require.True(t, q.Push(receivedPacket{}, h))
+		}
+		for range n {
+			_, _, ok := q.Pop()
+			require.True(t, ok)
+		}
+		require.True(t, q.Empty())
+	}
+
+	for range 100 {
+		require.True(t, q.Push(receivedPacket{}, h))
+	}
+	require.Equal(t, 128, q.main.Cap())
+	for range 99 {
+		_, _, ok := q.Pop()
+		require.True(t, ok)
+	}
+	require.Equal(t, 128, q.main.Cap())
+	// the burst used most of the storage, so it is kept when the queue is drained
+	_, _, ok := q.Pop()
+	require.True(t, ok)
+	require.Equal(t, 128, q.main.Cap())
+
+	// a busy queue keeps its storage
+	for range 10 {
+		pushAndPop(33)
+		require.Equal(t, 128, q.main.Cap())
+	}
+	// once the queue stays mostly empty, the storage is halved every time it is drained
+	pushAndPop(32)
+	require.Equal(t, 64, q.main.Cap())
+	pushAndPop(17)
+	require.Equal(t, 64, q.main.Cap())
+	for _, size := range []int{32, 16, 8, 8} {
+		pushAndPop(1)
+		require.Equal(t, size, q.main.Cap())
+	}
+
+	require.True(t, q.Push(receivedPacket{data: []byte("foo")}, h))
+	require.True(t, q.Push(receivedPacket{data: []byte("bar")}, h))
+	p, _, ok := q.Pop()
+	require.True(t, ok)
+	require.Equal(t, "foo", string(p.data))
+	p, _, ok = q.Pop()
+	require.True(t, ok)
+	require.Equal(t, "bar", string(p.data))
+}
+
 func TestReceivedPacketQueueClear(t *testing.T) {
 	h1 := &pathReceiver{id: 1}
 	h2 := &pathReceiver{id: 2}
